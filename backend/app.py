@@ -11,7 +11,7 @@ from diagnostic import diagnose_incident
 
 app = FastAPI(
     title="SentinelOps Incident Agent API",
-    description="Automated root-cause analysis and remediation service for platform incidents",
+    description="Automated root-cause analysis, remediation, and audit trail service for platform incidents",
     version="1.0.0"
 )
 
@@ -24,7 +24,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SCENARIOS_DIR = Path(__file__).parent / "scenarios"
+BASE_DIR = Path(__file__).parent
+SCENARIOS_DIR = BASE_DIR / "scenarios"
+AUDIT_LOG_FILE = BASE_DIR / "remediation_audit_trail.log"
 
 # In-memory system state tracking
 system_state = {
@@ -42,6 +44,7 @@ class DiagnoseRequest(BaseModel):
 class RemediateRequest(BaseModel):
     incident_id: str
     approved: bool
+    operator: Optional[str] = "sre-lead"
 
 
 def load_all_scenarios() -> Dict[str, Dict[str, Any]]:
@@ -61,6 +64,30 @@ def load_all_scenarios() -> Dict[str, Dict[str, Any]]:
         except Exception:
             continue
     return scenarios
+
+
+def log_remediation_audit(
+    incident_id: str,
+    operator: str,
+    action: str,
+    remediation_cmd: str,
+    rollback_cmd: str,
+    health_status: str
+) -> Dict[str, Any]:
+    """Appends an immutable JSON-line audit record to remediation_audit_trail.log."""
+    timestamp = datetime.now(timezone.utc).isoformat()
+    record = {
+        "timestamp_utc": timestamp,
+        "incident_id": incident_id,
+        "operator": operator,
+        "action": action,
+        "remediation_command": remediation_cmd,
+        "rollback_command": rollback_cmd,
+        "health_status": health_status
+    }
+    with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+    return record
 
 
 @app.get("/api/health")
@@ -105,32 +132,85 @@ def run_diagnosis(payload: DiagnoseRequest) -> Dict[str, Any]:
 
 @app.post("/api/remediate")
 def remediate_incident(payload: RemediateRequest) -> Dict[str, Any]:
-    """Applies remediation when approved and sets system state to HEALTHY."""
+    """
+    Applies remediation decision (approved or rejected), logs to audit trail,
+    and updates system state.
+    """
+    scenarios = load_all_scenarios()
+    incident_data = scenarios.get(payload.incident_id)
+
+    # Obtain recommended remediation details from diagnostic engine if available
+    remediation_cmd = "N/A"
+    rollback_cmd = "N/A"
+    if incident_data:
+        diag = diagnose_incident(incident_data)
+        remediation_cmd = diag.get("remediation_action", "N/A")
+        rollback_cmd = diag.get("rollback_command", "N/A")
+
+    operator_name = payload.operator or "sre-lead"
+
     if not payload.approved:
+        log_remediation_audit(
+            incident_id=payload.incident_id,
+            operator=operator_name,
+            action="REJECTED",
+            remediation_cmd=remediation_cmd,
+            rollback_cmd=rollback_cmd,
+            health_status="500 ERROR"
+        )
         return {
             "status": "APPROVAL_REQUIRED",
             "incident_id": payload.incident_id,
             "approved": False,
-            "message": "Remediation action was rejected or requires explicit approval."
+            "health_status": "500 ERROR",
+            "message": "Remediation action was rejected or denied by operator."
         }
 
-    # Update system state to HEALTHY
+    # Record approved execution
     timestamp = datetime.now(timezone.utc).isoformat()
     system_state["status"] = "HEALTHY"
     system_state["last_updated"] = timestamp
     system_state["remediated_incidents"].append({
         "incident_id": payload.incident_id,
         "timestamp": timestamp,
-        "status": "HEALTHY"
+        "status": "HEALTHY",
+        "rollback_command": rollback_cmd
     })
+
+    audit_entry = log_remediation_audit(
+        incident_id=payload.incident_id,
+        operator=operator_name,
+        action="APPROVED_EXECUTING",
+        remediation_cmd=remediation_cmd,
+        rollback_cmd=rollback_cmd,
+        health_status="200 OK"
+    )
 
     return {
         "status": "HEALTHY",
         "incident_id": payload.incident_id,
         "approved": True,
+        "health_status": "200 OK",
+        "audit_entry": audit_entry,
         "message": f"Remediation action for {payload.incident_id} executed successfully. System state is HEALTHY.",
         "timestamp": timestamp
     }
+
+
+@app.get("/api/audit-trail")
+def get_audit_trail() -> List[Dict[str, Any]]:
+    """Returns the chronological list of historical audit trail records."""
+    entries: List[Dict[str, Any]] = []
+    if AUDIT_LOG_FILE.exists():
+        with open(AUDIT_LOG_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped:
+                    try:
+                        entries.append(json.loads(stripped))
+                    except Exception:
+                        continue
+    return entries
 
 
 if __name__ == "__main__":
