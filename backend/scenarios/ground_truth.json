@@ -1,0 +1,10 @@
+{
+  "INC-8092": {
+    "ground_truth_cause": "Database connection pool exhaustion caused by bad config in v2.1.4",
+    "recommended_fix": "docker service rollback payment-service:v2.1.3"
+  },
+  "INC-8093": {
+    "ground_truth_cause": "Unbounded in-memory buffer cache causing Out Of Memory (Exit 137)",
+    "recommended_fix": "kubectl rollout undo deployment/image-processing-worker"
+  }
+}
