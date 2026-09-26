@@ -87,7 +87,8 @@ export function useIncidentWorkflow() {
     setRemediationError(null)
 
     try {
-      const payload = await remediate({ approved: true, signal: controller.signal })
+      const activeId = diagnosis?.incidentId || diagnosis?.incident_id || (scenario === 'memory_leak_oom' || scenario === 'INC-8093' ? 'INC-8093' : 'INC-8092')
+      const payload = await remediate({ incident_id: activeId, approved: true, signal: controller.signal })
       setRemediationResult(normalizeRemediationResult(payload))
       setPhase(PHASES.COMPLETED)
     } catch (error) {

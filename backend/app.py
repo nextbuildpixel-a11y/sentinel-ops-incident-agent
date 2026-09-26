@@ -38,17 +38,19 @@ system_state = {
 
 
 class DiagnoseRequest(BaseModel):
-    incident_id: str
+    incident_id: Optional[str] = None
+    scenario: Optional[str] = None
 
 
 class RemediateRequest(BaseModel):
-    incident_id: str
+    incident_id: Optional[str] = None
+    scenario: Optional[str] = None
     approved: bool
     operator: Optional[str] = "sre-lead"
 
 
 def load_all_scenarios() -> Dict[str, Dict[str, Any]]:
-    """Loads all incident scenario files, indexed by incident_id."""
+    """Loads all incident scenario files, indexed by incident_id and scenario stem."""
     scenarios: Dict[str, Dict[str, Any]] = {}
     if not SCENARIOS_DIR.exists():
         return scenarios
@@ -61,6 +63,7 @@ def load_all_scenarios() -> Dict[str, Dict[str, Any]]:
                 data = json.load(f)
                 if isinstance(data, dict) and "incident_id" in data:
                     scenarios[data["incident_id"]] = data
+                    scenarios[file_path.stem] = data
         except Exception:
             continue
     return scenarios
@@ -110,21 +113,23 @@ def list_incidents() -> List[Dict[str, Any]]:
 
 @app.post("/api/diagnose")
 def run_diagnosis(payload: DiagnoseRequest) -> Dict[str, Any]:
-    """Diagnoses an incident given its ID."""
+    """Diagnoses an incident given its ID or scenario name."""
     scenarios = load_all_scenarios()
-    incident_data = scenarios.get(payload.incident_id)
+    target_key = payload.incident_id or payload.scenario or "INC-8092"
+    incident_data = scenarios.get(target_key)
 
     if not incident_data:
         raise HTTPException(
             status_code=404,
-            detail=f"Incident with ID '{payload.incident_id}' not found in scenarios."
+            detail=f"Incident or scenario '{target_key}' not found."
         )
 
+    resolved_id = incident_data.get("incident_id", target_key)
     diagnosis = diagnose_incident(incident_data)
 
     return {
         "status": "success",
-        "incident_id": payload.incident_id,
+        "incident_id": resolved_id,
         "diagnosis": diagnosis,
         "raw_telemetry": incident_data
     }
@@ -137,7 +142,9 @@ def remediate_incident(payload: RemediateRequest) -> Dict[str, Any]:
     and updates system state.
     """
     scenarios = load_all_scenarios()
-    incident_data = scenarios.get(payload.incident_id)
+    target_key = payload.incident_id or payload.scenario or "INC-8092"
+    incident_data = scenarios.get(target_key)
+    resolved_id = incident_data.get("incident_id", target_key) if incident_data else target_key
 
     # Obtain recommended remediation details from diagnostic engine if available
     remediation_cmd = "N/A"
@@ -151,7 +158,7 @@ def remediate_incident(payload: RemediateRequest) -> Dict[str, Any]:
 
     if not payload.approved:
         log_remediation_audit(
-            incident_id=payload.incident_id,
+            incident_id=resolved_id,
             operator=operator_name,
             action="REJECTED",
             remediation_cmd=remediation_cmd,
@@ -160,7 +167,7 @@ def remediate_incident(payload: RemediateRequest) -> Dict[str, Any]:
         )
         return {
             "status": "APPROVAL_REQUIRED",
-            "incident_id": payload.incident_id,
+            "incident_id": resolved_id,
             "approved": False,
             "health_status": "500 ERROR",
             "message": "Remediation action was rejected or denied by operator."
@@ -171,14 +178,14 @@ def remediate_incident(payload: RemediateRequest) -> Dict[str, Any]:
     system_state["status"] = "HEALTHY"
     system_state["last_updated"] = timestamp
     system_state["remediated_incidents"].append({
-        "incident_id": payload.incident_id,
+        "incident_id": resolved_id,
         "timestamp": timestamp,
         "status": "HEALTHY",
         "rollback_command": rollback_cmd
     })
 
     audit_entry = log_remediation_audit(
-        incident_id=payload.incident_id,
+        incident_id=resolved_id,
         operator=operator_name,
         action="APPROVED_EXECUTING",
         remediation_cmd=remediation_cmd,
@@ -188,11 +195,11 @@ def remediate_incident(payload: RemediateRequest) -> Dict[str, Any]:
 
     return {
         "status": "HEALTHY",
-        "incident_id": payload.incident_id,
+        "incident_id": resolved_id,
         "approved": True,
         "health_status": "200 OK",
         "audit_entry": audit_entry,
-        "message": f"Remediation action for {payload.incident_id} executed successfully. System state is HEALTHY.",
+        "message": f"Remediation action for {resolved_id} executed successfully. System state is HEALTHY.",
         "timestamp": timestamp
     }
 

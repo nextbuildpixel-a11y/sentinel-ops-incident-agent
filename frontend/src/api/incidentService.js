@@ -25,14 +25,26 @@ export const SCENARIOS = [
 export const SCENARIO_IDS = SCENARIOS.map((scenario) => scenario.id)
 
 /**
+ * GET /incidents
+ * Lists all available scenarios from backend.
+ */
+export function getIncidents({ signal } = {}) {
+  return request('/incidents', {
+    method: 'GET',
+    signal,
+  })
+}
+
+/**
  * POST /diagnose
  * Runs the AI investigation for the selected scenario.
- * AI analysis can be slow, so this gets a generous timeout.
  */
 export function diagnose(scenario, { signal } = {}) {
+  const scenarioKey = typeof scenario === 'object' ? scenario?.id || scenario?.incident_id : scenario
+  const incident_id = scenarioKey === 'memory_leak_oom' || scenarioKey === 'INC-8093' ? 'INC-8093' : 'INC-8092'
   return request('/diagnose', {
     method: 'POST',
-    body: { scenario },
+    body: { scenario: scenarioKey, incident_id },
     signal,
     timeoutMs: 120000,
   })
@@ -43,11 +55,26 @@ export function diagnose(scenario, { signal } = {}) {
  * Triggers the fix. `approved: true` is the human-authorization flag the
  * backend requires before it will touch anything.
  */
-export function remediate({ approved, signal } = {}) {
+export function remediate({ incident_id, approved, signal } = {}) {
   return request('/remediate', {
     method: 'POST',
-    body: { approved: approved === true },
+    body: {
+      incident_id: incident_id || 'INC-8092',
+      approved: approved === true,
+      operator: 'sre-lead',
+    },
     signal,
     timeoutMs: 120000,
+  })
+}
+
+/**
+ * GET /audit-trail
+ * Retrieves chronological audit history from backend.
+ */
+export function getAuditTrail({ signal } = {}) {
+  return request('/audit-trail', {
+    method: 'GET',
+    signal,
   })
 }
