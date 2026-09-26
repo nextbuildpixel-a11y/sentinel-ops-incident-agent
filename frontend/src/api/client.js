@@ -5,7 +5,7 @@
  * never call `fetch` directly - they go through `api/incidentService.js`.
  */
 
-const DEFAULT_BASE_URL = 'http://localhost:8000/api'
+const DEFAULT_BASE_URL = '/api'
 
 // Strip trailing slashes so `${API_BASE_URL}/diagnose` never doubles up.
 export const API_BASE_URL = String(
