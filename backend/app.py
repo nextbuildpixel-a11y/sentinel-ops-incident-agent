@@ -40,6 +40,7 @@ system_state = {
 class DiagnoseRequest(BaseModel):
     incident_id: Optional[str] = None
     scenario: Optional[str] = None
+    custom_data: Optional[Dict[str, Any]] = None
 
 
 class RemediateRequest(BaseModel):
@@ -113,7 +114,18 @@ def list_incidents() -> List[Dict[str, Any]]:
 
 @app.post("/api/diagnose")
 def run_diagnosis(payload: DiagnoseRequest) -> Dict[str, Any]:
-    """Diagnoses an incident given its ID or scenario name."""
+    """Diagnoses an incident given custom telemetry, an incident ID, or scenario name."""
+    if payload.custom_data and isinstance(payload.custom_data, dict):
+        incident_data = payload.custom_data
+        resolved_id = incident_data.get("incident_id", "INC-CUSTOM-LIVE")
+        diagnosis = diagnose_incident(incident_data)
+        return {
+            "status": "success",
+            "incident_id": resolved_id,
+            "diagnosis": diagnosis,
+            "raw_telemetry": incident_data
+        }
+
     scenarios = load_all_scenarios()
     target_key = payload.incident_id or payload.scenario or "INC-8092"
     incident_data = scenarios.get(target_key)
