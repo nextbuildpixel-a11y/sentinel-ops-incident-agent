@@ -1,11 +1,12 @@
 import { useMemo } from 'react'
-import { Radar, RotateCcw, Satellite, ShieldCheck, Waypoints } from 'lucide-react'
+import { Radar, RotateCcw, Satellite, ShieldCheck, Waypoints, Layers, Terminal } from 'lucide-react'
 import { useIncidentWorkflow, PHASES } from './hooks/useIncidentWorkflow'
 import { API_BASE_URL } from './api/client'
 import { buildDiagnosisView } from './lib/contract'
-import { Badge, ErrorBanner } from './components/ui/primitives'
+import { Badge, ErrorBanner, cx } from './components/ui/primitives'
 import { IncidentBanner } from './components/IncidentBanner'
 import { ScenarioSelector } from './components/ScenarioSelector'
+import { CustomTelemetryEditor } from './components/CustomTelemetryEditor'
 import { InvestigateButton } from './components/InvestigateButton'
 import { SystemHealthBanner } from './components/SystemHealthBanner'
 import { WorkflowRail } from './components/WorkflowRail'
@@ -28,7 +29,11 @@ export default function App() {
   const workflow = useIncidentWorkflow()
   const {
     phase,
+    mode,
+    switchMode,
     scenario,
+    customTelemetry,
+    updateCustomTelemetry,
     diagnosis,
     remediationResult,
     investigationError,
@@ -98,7 +103,12 @@ export default function App() {
         <main className="space-y-3.5">
           {/* ================= SYSTEM STATE + INCIDENT ================= */}
           <div className="grid gap-3.5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
-            <IncidentBanner phase={phase} scenario={scenario} />
+            <IncidentBanner
+              phase={phase}
+              scenario={scenario}
+              mode={mode}
+              customTitle={view?.service ? `Custom Service (${view.service})` : undefined}
+            />
             <div className="lg:w-72">
               <SystemHealthBanner health={health} />
             </div>
@@ -106,18 +116,63 @@ export default function App() {
 
           {/* ================= SCENARIO + PRIMARY CTA ================= */}
           <section className="rounded-lg border border-line bg-surface p-4">
-            <div className="mb-3 flex items-center gap-2">
-              <h2 className="text-[11px] font-semibold tracking-[0.14em] text-ink-muted uppercase">
-                Select Incident Scenario
-              </h2>
+            <div className="mb-3.5 flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
+              <div className="flex items-center gap-2">
+                <h2 className="text-[11px] font-semibold tracking-[0.14em] text-ink-muted uppercase">
+                  Incident Ingestion Mode
+                </h2>
+              </div>
+
+              {/* Mode Switcher Tabs */}
+              <div className="inline-flex rounded-lg border border-line bg-surface-base p-1 text-xs">
+                <button
+                  type="button"
+                  disabled={controlsLocked}
+                  onClick={() => switchMode('preset')}
+                  className={cx(
+                    'inline-flex items-center gap-1.5 rounded-md px-3 py-1 font-medium transition-all',
+                    mode === 'preset'
+                      ? 'bg-brand/15 text-brand shadow-sm font-semibold'
+                      : 'text-ink-muted hover:text-ink',
+                    controlsLocked && 'opacity-50 cursor-not-allowed'
+                  )}
+                >
+                  <Layers size={13} aria-hidden="true" />
+                  Preset Scenarios
+                </button>
+
+                <button
+                  type="button"
+                  disabled={controlsLocked}
+                  onClick={() => switchMode('custom')}
+                  className={cx(
+                    'inline-flex items-center gap-1.5 rounded-md px-3 py-1 font-medium transition-all',
+                    mode === 'custom'
+                      ? 'bg-brand/15 text-brand shadow-sm font-semibold'
+                      : 'text-ink-muted hover:text-ink',
+                    controlsLocked && 'opacity-50 cursor-not-allowed'
+                  )}
+                >
+                  <Terminal size={13} aria-hidden="true" />
+                  Custom Telemetry Input
+                </button>
+              </div>
             </div>
 
-            <ScenarioSelector selected={scenario} onSelect={selectScenario} disabled={controlsLocked} />
+            {mode === 'preset' ? (
+              <ScenarioSelector selected={scenario} onSelect={selectScenario} disabled={controlsLocked} />
+            ) : (
+              <CustomTelemetryEditor
+                value={customTelemetry}
+                onChange={updateCustomTelemetry}
+                disabled={controlsLocked}
+              />
+            )}
 
             <div className="mt-4 border-t border-line pt-4">
               <InvestigateButton
                 onClick={runInvestigation}
-                disabled={!scenario}
+                disabled={mode === 'preset' ? !scenario : !customTelemetry.trim()}
                 loading={isInvestigating}
                 hasResult={hasResults}
               />

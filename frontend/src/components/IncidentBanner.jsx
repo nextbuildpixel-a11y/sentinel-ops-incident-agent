@@ -1,4 +1,4 @@
-import { Activity, CircleDot, Database, MemoryStick, ShieldAlert } from 'lucide-react'
+import { Activity, CircleDot, Database, MemoryStick, ShieldAlert, Code2, Zap } from 'lucide-react'
 import { PHASES } from '../hooks/useIncidentWorkflow'
 import { SCENARIOS } from '../api/incidentService'
 import { Badge, cx } from './ui/primitives'
@@ -6,6 +6,8 @@ import { Badge, cx } from './ui/primitives'
 const SCENARIO_ICONS = {
   db_pool_exhausted: Database,
   memory_leak_oom: MemoryStick,
+  redis_cache_failure: Zap,
+  custom: Code2,
 }
 
 /**
@@ -14,7 +16,7 @@ const SCENARIO_ICONS = {
  * invent one - this banner reflects real client state only.
  */
 const PHASE_STATE = {
-  [PHASES.IDLE]: { label: 'No active incident', hint: 'Select a scenario to begin', tone: 'slate', live: false },
+  [PHASES.IDLE]: { label: 'No active incident', hint: 'Select a scenario or paste telemetry to begin', tone: 'slate', live: false },
   [PHASES.READY]: { label: 'Incident detected', hint: 'Awaiting AI investigation', tone: 'amber', live: true },
   [PHASES.INVESTIGATING]: { label: 'Incident detected', hint: 'AI investigation in progress', tone: 'amber', live: true },
   [PHASES.AWAITING_AUTHORIZATION]: {
@@ -28,9 +30,16 @@ const PHASE_STATE = {
 }
 
 /** Strong incident header. Severity styling is scoped to the badge, never the page. */
-export function IncidentBanner({ phase, scenario }) {
+export function IncidentBanner({ phase, scenario, mode = 'preset', customTitle }) {
   const state = PHASE_STATE[phase] ?? PHASE_STATE[PHASES.IDLE]
-  const meta = SCENARIOS.find((item) => item.id === scenario)
+  let meta = SCENARIOS.find((item) => item.id === scenario)
+  if (mode === 'custom') {
+    meta = {
+      id: 'custom',
+      label: customTitle || 'Custom Ingested Telemetry',
+      summary: 'Arbitrary error logs & metrics stream ready for AI investigation',
+    }
+  }
   const Icon = meta ? (SCENARIO_ICONS[meta.id] ?? ShieldAlert) : ShieldAlert
   const isIncident = state.live
 

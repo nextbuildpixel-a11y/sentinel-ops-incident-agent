@@ -131,7 +131,7 @@ in_memory_audit_trail: List[Dict[str, Any]] = []
 class DiagnoseRequest(BaseModel):
     incident_id: Optional[str] = None
     scenario: Optional[str] = None
-    custom_data: Optional[Dict[str, Any]] = None
+    custom_data: Optional[Any] = None
 
 
 class RemediateRequest(BaseModel):
@@ -306,10 +306,42 @@ def deterministic_heuristic_diagnose(
             if log.get("level") in ["WARN", "ERROR"]:
                 supporting_evidence.append(f"Log [{log.get('level')}] @ {log.get('timestamp')}: {log.get('message')}")
 
-    # Pattern 4: General Fallback
+    # Pattern 4: Kafka Consumer Group Rebalance Storm & Lag Spike
+    elif (
+        "kafka" in combined_log_text.lower()
+        or "rebalance" in combined_log_text.lower()
+        or "consumer lag" in combined_log_text.lower()
+        or any(m.get("consumer_lag", 0) > 1000 for m in metrics)
+        or any(m.get("rebalances_total", 0) > 5 for m in metrics)
+    ):
+        root_cause = f"Kafka consumer group rebalance storm caused by aggressive max.poll.interval.ms in {version}"
+        confidence_score = 0.98
+        remediation_action = f"Roll back {service} to previous stable release and restore max.poll.interval.ms to 30000ms"
+        rollback_command = f"kubectl rollout undo deployment/{service}"
+        summary = (
+            f"Service {service} triggered repeated rebalance storms and consumer lag spikes "
+            f"following release {version} ('{commit_msg}')."
+        )
+        if latest_deploy:
+            supporting_evidence.append(
+                f"Deployment {latest_deploy.get('version')} commit: '{commit_msg}' by {latest_deploy.get('author')}"
+            )
+        for m in metrics:
+            if m.get("consumer_lag", 0) > 1000 or m.get("rebalances_total", 0) > 0:
+                supporting_evidence.append(
+                    f"Metric @ {m.get('timestamp')}: consumer_lag={m.get('consumer_lag')}, rebalances_total={m.get('rebalances_total')}"
+                )
+        for log in logs:
+            if log.get("level") in ["WARN", "ERROR"] and any(
+                term in log.get("message", "").lower()
+                for term in ["kafka", "rebalance", "poll", "lag", "commit"]
+            ):
+                supporting_evidence.append(f"Log [{log.get('level')}] @ {log.get('timestamp')}: {log.get('message')}")
+
+    # Pattern 5: General Fallback
     else:
-        root_cause = f"Degradation following deployment of {version}: {commit_msg}"
-        confidence_score = 0.75
+        root_cause = f"Degradation following deployment of {version}: {commit_msg}" if commit_msg else "Anomalous error pattern detected in telemetry"
+        confidence_score = 0.85
         remediation_action = f"Rollback deployment for {service}"
         rollback_command = f"kubectl rollout undo deployment/{service}"
         summary = f"Anomalous telemetry and error logs observed in {service}."
@@ -447,6 +479,22 @@ def handle_health() -> Dict[str, Any]:
         "remediated_incidents": system_state["remediated_incidents"]
     }
 
+@app.get("/")
+def get_root() -> Dict[str, Any]:
+    """Root status endpoint to prevent 404s when navigating to backend root."""
+    return {
+        "status": "online",
+        "service": "SentinelOps Incident Agent API",
+        "version": "1.0.0",
+        "endpoints": [
+            "/api/health",
+            "/api/incidents",
+            "/api/diagnose",
+            "/api/remediate",
+            "/api/audit-trail"
+        ]
+    }
+
 @app.get("/api/health")
 @app.get("/health")
 def get_health() -> Dict[str, Any]:
@@ -472,16 +520,42 @@ def list_incidents() -> List[Dict[str, Any]]:
 
 
 def handle_diagnose(payload: DiagnoseRequest) -> Dict[str, Any]:
-    if payload.custom_data and isinstance(payload.custom_data, dict):
-        incident_data = payload.custom_data
-        resolved_id = incident_data.get("incident_id", "INC-CUSTOM-LIVE")
-        diagnosis = diagnose_incident(incident_data)
-        return {
-            "status": "success",
-            "incident_id": resolved_id,
-            "diagnosis": diagnosis,
-            "raw_telemetry": incident_data
-        }
+    if payload.custom_data is not None:
+        incident_data = None
+        if isinstance(payload.custom_data, dict):
+            incident_data = payload.custom_data
+        elif isinstance(payload.custom_data, str):
+            text = payload.custom_data.strip()
+            if text.startswith("{") or text.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, dict):
+                        incident_data = parsed
+                except Exception:
+                    pass
+            if incident_data is None:
+                incident_data = {
+                    "incident_id": "INC-CUSTOM-LIVE",
+                    "title": "Custom Ingested Telemetry Incident",
+                    "service": "custom-service",
+                    "severity": "CRITICAL",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "deployment_history": [],
+                    "metrics": [],
+                    "logs": [
+                        {"timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"), "level": "ERROR", "message": line.strip()}
+                        for line in text.splitlines() if line.strip()
+                    ]
+                }
+        if incident_data:
+            resolved_id = incident_data.get("incident_id", "INC-CUSTOM-LIVE")
+            diagnosis = diagnose_incident(incident_data)
+            return {
+                "status": "success",
+                "incident_id": resolved_id,
+                "diagnosis": diagnosis,
+                "raw_telemetry": incident_data
+            }
 
     scenarios = load_all_scenarios()
     target_key = payload.incident_id or payload.scenario or "INC-8092"

@@ -40,7 +40,7 @@ system_state = {
 class DiagnoseRequest(BaseModel):
     incident_id: Optional[str] = None
     scenario: Optional[str] = None
-    custom_data: Optional[Dict[str, Any]] = None
+    custom_data: Optional[Any] = None
 
 
 class RemediateRequest(BaseModel):
@@ -94,6 +94,23 @@ def log_remediation_audit(
     return record
 
 
+@app.get("/")
+def get_root() -> Dict[str, Any]:
+    """Root status endpoint to prevent 404s when navigating to backend root."""
+    return {
+        "status": "online",
+        "service": "SentinelOps Incident Agent API",
+        "version": "1.0.0",
+        "endpoints": [
+            "/api/health",
+            "/api/incidents",
+            "/api/diagnose",
+            "/api/remediate",
+            "/api/audit-trail"
+        ]
+    }
+
+
 @app.get("/api/health")
 def get_health() -> Dict[str, Any]:
     """Returns current system health status."""
@@ -115,16 +132,42 @@ def list_incidents() -> List[Dict[str, Any]]:
 @app.post("/api/diagnose")
 def run_diagnosis(payload: DiagnoseRequest) -> Dict[str, Any]:
     """Diagnoses an incident given custom telemetry, an incident ID, or scenario name."""
-    if payload.custom_data and isinstance(payload.custom_data, dict):
-        incident_data = payload.custom_data
-        resolved_id = incident_data.get("incident_id", "INC-CUSTOM-LIVE")
-        diagnosis = diagnose_incident(incident_data)
-        return {
-            "status": "success",
-            "incident_id": resolved_id,
-            "diagnosis": diagnosis,
-            "raw_telemetry": incident_data
-        }
+    if payload.custom_data is not None:
+        incident_data = None
+        if isinstance(payload.custom_data, dict):
+            incident_data = payload.custom_data
+        elif isinstance(payload.custom_data, str):
+            text = payload.custom_data.strip()
+            if text.startswith("{") or text.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, dict):
+                        incident_data = parsed
+                except Exception:
+                    pass
+            if incident_data is None:
+                incident_data = {
+                    "incident_id": "INC-CUSTOM-LIVE",
+                    "title": "Custom Ingested Telemetry Incident",
+                    "service": "custom-service",
+                    "severity": "CRITICAL",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "deployment_history": [],
+                    "metrics": [],
+                    "logs": [
+                        {"timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"), "level": "ERROR", "message": line.strip()}
+                        for line in text.splitlines() if line.strip()
+                    ]
+                }
+        if incident_data:
+            resolved_id = incident_data.get("incident_id", "INC-CUSTOM-LIVE")
+            diagnosis = diagnose_incident(incident_data)
+            return {
+                "status": "success",
+                "incident_id": resolved_id,
+                "diagnosis": diagnosis,
+                "raw_telemetry": incident_data
+            }
 
     scenarios = load_all_scenarios()
     target_key = payload.incident_id or payload.scenario or "INC-8092"

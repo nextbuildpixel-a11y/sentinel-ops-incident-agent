@@ -1,10 +1,11 @@
-import { Database, MemoryStick, ShieldAlert } from 'lucide-react'
+import { Database, MemoryStick, ShieldAlert, Zap } from 'lucide-react'
 import { SCENARIOS } from '../api/incidentService'
 import { cx } from './ui/primitives'
 
 const ICONS = {
   db_pool_exhausted: Database,
   memory_leak_oom: MemoryStick,
+  redis_cache_failure: Zap,
 }
 
 /**
@@ -13,7 +14,7 @@ const ICONS = {
  */
 export function ScenarioSelector({ selected, onSelect, disabled }) {
   return (
-    <div role="radiogroup" aria-label="Incident scenario" className="grid gap-2 sm:grid-cols-2">
+    <div role="radiogroup" aria-label="Incident scenario" className="grid gap-2 sm:grid-cols-3">
       {SCENARIOS.map((scenario) => {
         const Icon = ICONS[scenario.id] ?? ShieldAlert
         const isSelected = selected === scenario.id

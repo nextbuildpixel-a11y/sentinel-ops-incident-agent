@@ -4,9 +4,17 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from google import genai
-from google.genai import types
-from groq import Groq
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
+
+try:
+    from groq import Groq
+except ImportError:
+    Groq = None
 
 
 def get_api_key(name: str) -> str:
@@ -151,12 +159,66 @@ def deterministic_heuristic_diagnose(
                     f"Log [{log.get('level')}] @ {log.get('timestamp')}: {log.get('message')}"
                 )
 
-    else:
-        root_cause = f"Degradation following deployment of {version}: {commit_msg}"
-        confidence_score = 0.75
-        remediation_action = f"Rollback deployment for {service}"
+    # Pattern 3: Redis Cache Partition / Auth Latency Spike
+    elif (
+        "redis" in combined_log_text.lower()
+        or "tls certificate hostname mismatch" in combined_log_text.lower()
+        or any(m.get("redis_connections_active", 100) == 0 for m in metrics)
+    ):
+        root_cause = f"Redis cache cluster TLS handshake failure and timeout in {version}"
+        confidence_score = 0.96
+        remediation_action = f"Rollback {service} to relax strict TLS hostname check and increase redis timeout"
         rollback_command = f"kubectl rollout undo deployment/{service}"
-        summary = f"Anomalous behavior observed in {service} across logs and telemetry."
+        summary = (
+            f"Service {service} experienced 504 Gateway Timeouts after {version} "
+            f"due to Redis TLS hostname verification mismatch."
+        )
+        if latest_deploy:
+            supporting_evidence.append(
+                f"Deployment {latest_deploy.get('version')} commit: '{commit_msg}' by {latest_deploy.get('author')}"
+            )
+        for log in logs:
+            if log.get("level") in ["WARN", "ERROR"]:
+                supporting_evidence.append(f"Log [{log.get('level')}] @ {log.get('timestamp')}: {log.get('message')}")
+
+    # Pattern 4: Kafka Consumer Group Rebalance Storm & Lag Spike
+    elif (
+        "kafka" in combined_log_text.lower()
+        or "rebalance" in combined_log_text.lower()
+        or "consumer lag" in combined_log_text.lower()
+        or any(m.get("consumer_lag", 0) > 1000 for m in metrics)
+        or any(m.get("rebalances_total", 0) > 5 for m in metrics)
+    ):
+        root_cause = f"Kafka consumer group rebalance storm caused by aggressive max.poll.interval.ms in {version}"
+        confidence_score = 0.98
+        remediation_action = f"Roll back {service} to previous stable release and restore max.poll.interval.ms to 30000ms"
+        rollback_command = f"kubectl rollout undo deployment/{service}"
+        summary = (
+            f"Service {service} triggered repeated rebalance storms and consumer lag spikes "
+            f"following release {version} ('{commit_msg}')."
+        )
+        if latest_deploy:
+            supporting_evidence.append(
+                f"Deployment {latest_deploy.get('version')} commit: '{commit_msg}' by {latest_deploy.get('author')}"
+            )
+        for m in metrics:
+            if m.get("consumer_lag", 0) > 1000 or m.get("rebalances_total", 0) > 0:
+                supporting_evidence.append(
+                    f"Metric @ {m.get('timestamp')}: consumer_lag={m.get('consumer_lag')}, rebalances_total={m.get('rebalances_total')}"
+                )
+        for log in logs:
+            if log.get("level") in ["WARN", "ERROR"] and any(
+                term in log.get("message", "").lower()
+                for term in ["kafka", "rebalance", "poll", "lag", "commit"]
+            ):
+                supporting_evidence.append(f"Log [{log.get('level')}] @ {log.get('timestamp')}: {log.get('message')}")
+
+    else:
+        root_cause = f"Degradation following deployment of {version}: {commit_msg}" if commit_msg else "Anomalous error pattern detected in telemetry"
+        confidence_score = 0.85
+        remediation_action = f"Rollback recent deployment for {service}"
+        rollback_command = f"kubectl rollout undo deployment/{service}"
+        summary = f"Anomalous telemetry and error logs observed in {service}."
         for log in logs:
             if log.get("level") in ["WARN", "ERROR"]:
                 supporting_evidence.append(f"Log [{log.get('level')}] @ {log.get('timestamp')}: {log.get('message')}")
@@ -208,7 +270,7 @@ def diagnose_incident(data: Dict[str, Any]) -> Dict[str, Any]:
     # TIER 1 (Primary): Google Gemini API
     # =========================================================================
     gemini_key = get_api_key("GEMINI_API_KEY")
-    if gemini_key:
+    if gemini_key and genai is not None:
         try:
             client = genai.Client(api_key=gemini_key)
             config = types.GenerateContentConfig(
@@ -257,7 +319,7 @@ def diagnose_incident(data: Dict[str, Any]) -> Dict[str, Any]:
     # TIER 2 (Instant Failover): Groq API (Meta Llama 3.1 8B Instant)
     # =========================================================================
     groq_key = get_api_key("GROQ_API_KEY")
-    if groq_key:
+    if groq_key and Groq is not None:
         try:
             groq_client = Groq(api_key=groq_key)
             groq_models = ["llama-3.1-8b-instant", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]

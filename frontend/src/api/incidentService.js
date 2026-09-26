@@ -19,6 +19,11 @@ export const SCENARIOS = [
     label: 'Memory Leak / OOM',
     summary: 'Resident memory climbing until the container is killed.',
   },
+  {
+    id: 'redis_cache_failure',
+    label: 'Redis TLS & Latency Spike',
+    summary: 'Redis handshake failure causing auth timeouts & 504 errors.',
+  },
 ]
 
 /** Ids only - handy for validation without importing the whole list. */
@@ -37,14 +42,26 @@ export function getIncidents({ signal } = {}) {
 
 /**
  * POST /diagnose
- * Runs the AI investigation for the selected scenario.
+ * Runs the AI investigation for the selected scenario or custom telemetry.
  */
-export function diagnose(scenario, { signal } = {}) {
-  const scenarioKey = typeof scenario === 'object' ? scenario?.id || scenario?.incident_id : scenario
-  const incident_id = scenarioKey === 'memory_leak_oom' || scenarioKey === 'INC-8093' ? 'INC-8093' : 'INC-8092'
+export function diagnose(scenario, { signal, customData } = {}) {
+  let body
+  if (customData !== undefined && customData !== null) {
+    body = { custom_data: customData }
+  } else {
+    const scenarioKey = typeof scenario === 'object' ? scenario?.id || scenario?.incident_id : scenario
+    const incident_id =
+      scenarioKey === 'memory_leak_oom' || scenarioKey === 'INC-8093'
+        ? 'INC-8093'
+        : scenarioKey === 'redis_cache_failure' || scenarioKey === 'INC-8094'
+        ? 'INC-8094'
+        : 'INC-8092'
+    body = { scenario: scenarioKey, incident_id }
+  }
+
   return request('/diagnose', {
     method: 'POST',
-    body: { scenario: scenarioKey, incident_id },
+    body,
     signal,
     timeoutMs: 120000,
   })

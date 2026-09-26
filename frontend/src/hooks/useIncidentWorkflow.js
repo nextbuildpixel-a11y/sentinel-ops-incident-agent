@@ -26,7 +26,9 @@ export const PHASES = {
 const messageOf = (error, fallback) => error?.message || fallback
 
 export function useIncidentWorkflow() {
+  const [mode, setMode] = useState('preset') // 'preset' | 'custom'
   const [scenario, setScenario] = useState(null)
+  const [customTelemetry, setCustomTelemetry] = useState('')
   const [phase, setPhase] = useState(PHASES.IDLE)
   const [diagnosis, setDiagnosis] = useState(null)
   const [remediationResult, setRemediationResult] = useState(null)
@@ -56,8 +58,39 @@ export function useIncidentWorkflow() {
     setPhase(PHASES.READY)
   }, [])
 
+  /** Switching tabs/modes */
+  const switchMode = useCallback((nextMode) => {
+    activeRequest.current?.abort()
+    activeRequest.current = null
+    setMode(nextMode)
+    setDiagnosis(null)
+    setRemediationResult(null)
+    setInvestigationError(null)
+    setRemediationError(null)
+    if (nextMode === 'preset') {
+      setPhase(scenario ? PHASES.READY : PHASES.IDLE)
+    } else {
+      setPhase(customTelemetry.trim() ? PHASES.READY : PHASES.IDLE)
+    }
+  }, [scenario, customTelemetry])
+
+  /** Updating custom telemetry string */
+  const updateCustomTelemetry = useCallback((text) => {
+    setCustomTelemetry(text)
+    if (mode === 'custom') {
+      if (text.trim() && (phase === PHASES.IDLE || phase === PHASES.READY)) {
+        setPhase(PHASES.READY)
+      } else if (!text.trim() && phase === PHASES.READY) {
+        setPhase(PHASES.IDLE)
+      }
+    }
+  }, [mode, phase])
+
   const runInvestigation = useCallback(async () => {
-    if (!scenario) return
+    const isCustom = mode === 'custom'
+    if (isCustom && !customTelemetry.trim()) return
+    if (!isCustom && !scenario) return
+
     const controller = new AbortController()
     activeRequest.current = controller
 
@@ -67,7 +100,22 @@ export function useIncidentWorkflow() {
     setRemediationResult(null)
 
     try {
-      const payload = await diagnose(scenario, { signal: controller.signal })
+      let payload
+      if (isCustom) {
+        const trimmed = customTelemetry.trim()
+        let customData = trimmed
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          try {
+            customData = JSON.parse(trimmed)
+          } catch {
+            customData = trimmed
+          }
+        }
+        payload = await diagnose(null, { customData, signal: controller.signal })
+      } else {
+        payload = await diagnose(scenario, { signal: controller.signal })
+      }
+
       setDiagnosis(normalizeDiagnosis(payload))
       setPhase(PHASES.AWAITING_AUTHORIZATION)
     } catch (error) {
@@ -77,7 +125,7 @@ export function useIncidentWorkflow() {
     } finally {
       if (activeRequest.current === controller) activeRequest.current = null
     }
-  }, [scenario])
+  }, [mode, scenario, customTelemetry])
 
   const approveAndExecute = useCallback(async () => {
     const controller = new AbortController()
@@ -87,7 +135,17 @@ export function useIncidentWorkflow() {
     setRemediationError(null)
 
     try {
-      const activeId = diagnosis?.incidentId || diagnosis?.incident_id || (scenario === 'memory_leak_oom' || scenario === 'INC-8093' ? 'INC-8093' : 'INC-8092')
+      const activeId =
+        diagnosis?.incidentId ||
+        diagnosis?.incident_id ||
+        (scenario === 'memory_leak_oom' || scenario === 'INC-8093'
+          ? 'INC-8093'
+          : scenario === 'redis_cache_failure' || scenario === 'INC-8094'
+          ? 'INC-8094'
+          : mode === 'custom'
+          ? 'INC-CUSTOM-LIVE'
+          : 'INC-8092')
+
       const payload = await remediate({ incident_id: activeId, approved: true, signal: controller.signal })
       setRemediationResult(normalizeRemediationResult(payload))
       setPhase(PHASES.COMPLETED)
@@ -102,11 +160,12 @@ export function useIncidentWorkflow() {
     } finally {
       if (activeRequest.current === controller) activeRequest.current = null
     }
-  }, [])
+  }, [diagnosis, scenario, mode])
 
   const reset = useCallback(() => {
     abortActive()
     setScenario(null)
+    setCustomTelemetry('')
     setPhase(PHASES.IDLE)
     setDiagnosis(null)
     setRemediationResult(null)
@@ -140,7 +199,11 @@ export function useIncidentWorkflow() {
 
   return {
     phase,
+    mode,
+    switchMode,
     scenario,
+    customTelemetry,
+    updateCustomTelemetry,
     diagnosis,
     remediationResult,
     investigationError,
