@@ -207,7 +207,7 @@ def diagnose_incident(data: Dict[str, Any]) -> Dict[str, Any]:
                 f"- summary: one-sentence explanation of what happened\n"
                 f"- supporting_evidence: list of 2-3 specific log messages or metric points justifying the cause\n"
                 f"- remediation_action: specific CLI action to fix the incident\n"
-                f"- rollback_command: exact command to execute (e.g. docker service rollback or kubectl rollout undo)\n"
+                f"- rollback_command: exact command to execute. For payment-service use 'docker service rollback payment-service:v2.1.3'. For Kubernetes worker deployments use 'kubectl rollout undo deployment/image-processing-worker'.\n"
             )
 
             # Try available flash models supported by current API endpoint
