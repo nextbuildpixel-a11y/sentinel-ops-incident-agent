@@ -1,19 +1,40 @@
+import json
+import os
 import time
+from pathlib import Path
 from typing import Any, Dict, List
 
+from google import genai
+from google.genai import types
 
-def diagnose_incident(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Inspects deployment history, metrics, and logs to diagnose an incident."""
-    start_time = time.perf_counter()
 
-    incident_id = data.get("incident_id", "UNKNOWN")
-    service = data.get("service", "unknown-service")
-    title = data.get("title", "Incident Detected")
+def get_gemini_api_key() -> str:
+    """Retrieves GEMINI_API_KEY from environment or backend/.env file."""
+    key = os.environ.get("GEMINI_API_KEY")
+    if key and key.strip():
+        return key.strip()
+
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped.startswith("GEMINI_API_KEY="):
+                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            return val
+        except Exception:
+            pass
+    return ""
+
+
+def build_timeline(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Builds a unified chronological timeline from deployments, metrics, and logs."""
     deployments = data.get("deployment_history", [])
     metrics = data.get("metrics", [])
     logs = data.get("logs", [])
 
-    # Build chronological timeline
     timeline: List[Dict[str, Any]] = []
 
     for dep in deployments:
@@ -38,19 +59,25 @@ def diagnose_incident(data: Dict[str, Any]) -> Dict[str, Any]:
             "description": log.get("message")
         })
 
-    # Sort timeline entries by timestamp string
     timeline.sort(key=lambda item: str(item.get("timestamp", "")))
+    return timeline
 
-    # Analyze logs and metrics for root cause indicators
+
+def deterministic_heuristic_diagnose(
+    data: Dict[str, Any],
+    timeline: List[Dict[str, Any]],
+    start_time: float
+) -> Dict[str, Any]:
+    """Deterministic fallback diagnostic engine using multi-modal heuristics."""
+    incident_id = data.get("incident_id", "UNKNOWN")
+    service = data.get("service", "unknown-service")
+    deployments = data.get("deployment_history", [])
+    metrics = data.get("metrics", [])
+    logs = data.get("logs", [])
+
     log_messages = [l.get("message", "") for l in logs]
     combined_log_text = " ".join(log_messages)
     supporting_evidence: List[str] = []
-
-    root_cause = ""
-    confidence_score = 0.85
-    remediation_action = ""
-    rollback_command = ""
-    summary = ""
 
     latest_deploy = deployments[-1] if deployments else {}
     version = latest_deploy.get("version", "previous")
@@ -71,7 +98,6 @@ def diagnose_incident(data: Dict[str, Any]) -> Dict[str, Any]:
             f"introduced in release {version} ('{commit_msg}')."
         )
 
-        # Collect exact cited evidence
         if latest_deploy:
             supporting_evidence.append(
                 f"Deployment {latest_deploy.get('version')} commit: '{commit_msg}' by {latest_deploy.get('author')}"
@@ -125,7 +151,6 @@ def diagnose_incident(data: Dict[str, Any]) -> Dict[str, Any]:
                 )
 
     else:
-        # Fallback heuristic
         root_cause = f"Degradation following deployment of {version}: {commit_msg}"
         confidence_score = 0.75
         remediation_action = f"Rollback deployment for {service}"
@@ -149,4 +174,83 @@ def diagnose_incident(data: Dict[str, Any]) -> Dict[str, Any]:
         "rollback_command": rollback_command,
         "requires_human_approval": True,
         "diagnosis_latency_ms": diagnosis_latency_ms,
+        "engine": "Deterministic-Heuristic-Fallback",
     }
+
+
+def diagnose_incident(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Diagnoses an incident using Google Gemini LLM reasoning when GEMINI_API_KEY is available,
+    with an automatic fallback to the deterministic heuristic engine.
+    """
+    start_time = time.perf_counter()
+    timeline = build_timeline(data)
+    incident_id = data.get("incident_id", "UNKNOWN")
+    service = data.get("service", "unknown-service")
+
+    api_key = get_gemini_api_key()
+
+    if api_key:
+        try:
+            client = genai.Client(api_key=api_key)
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1
+            )
+            prompt = (
+                f"You are an autonomous SRE Incident Diagnosis Agent.\n"
+                f"Analyze this incident data:\n"
+                f"{json.dumps(data, indent=2)}\n\n"
+                f"Return strict JSON with the following exact keys:\n"
+                f"- root_cause: concise summary of the breaking root cause\n"
+                f"- confidence_score: float between 0.0 and 1.0\n"
+                f"- summary: one-sentence explanation of what happened\n"
+                f"- supporting_evidence: list of 2-3 specific log messages or metric points justifying the cause\n"
+                f"- remediation_action: specific CLI action to fix the incident\n"
+                f"- rollback_command: exact command to execute (e.g. docker service rollback or kubectl rollout undo)\n"
+            )
+
+            # Try available flash models supported by current API endpoint
+            candidate_models = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.8-flash", "gemini-1.5-flash"]
+            response = None
+            last_err = None
+
+            for mod in candidate_models:
+                try:
+                    response = client.models.generate_content(
+                        model=mod,
+                        contents=prompt,
+                        config=config
+                    )
+                    if response and response.text:
+                        break
+                except Exception as err:
+                    last_err = err
+                    continue
+
+            if response is None or not response.text:
+                raise last_err or RuntimeError("No response returned from Gemini models")
+
+            parsed = json.loads(response.text)
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+            return {
+                "incident_id": incident_id,
+                "service": service,
+                "summary": parsed.get("summary", ""),
+                "timeline": timeline,
+                "root_cause": parsed.get("root_cause", ""),
+                "confidence_score": float(parsed.get("confidence_score", 0.96)),
+                "supporting_evidence": parsed.get("supporting_evidence", []),
+                "remediation_action": parsed.get("remediation_action", ""),
+                "rollback_command": parsed.get("rollback_command", ""),
+                "requires_human_approval": True,
+                "diagnosis_latency_ms": latency_ms,
+                "engine": "Gemini-1.5-Flash-Agent",
+            }
+        except Exception:
+            # Fall back to deterministic engine gracefully upon any API/network failure
+            return deterministic_heuristic_diagnose(data, timeline, start_time)
+
+    # Missing API key fallback
+    return deterministic_heuristic_diagnose(data, timeline, start_time)
