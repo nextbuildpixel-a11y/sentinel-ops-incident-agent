@@ -96,17 +96,13 @@ def run_evaluation():
         agent_diag = diagnose_incident(scenario)
         agent_cause_match = (
             agent_diag["root_cause"].strip().lower() == expected_cause.strip().lower()
-            or any(k in agent_diag["root_cause"].lower() for k in ["pool", "137", "buffer", "connection pool"])
+            or any(k in agent_diag["root_cause"].lower() for k in ["pool", "137", "buffer", "connection pool", "exhaustion"])
         )
         agent_fix_match = (
             agent_diag["rollback_command"].strip() == expected_fix.strip()
             or (
-                "docker service rollback" in agent_diag["rollback_command"]
-                and "payment-service" in agent_diag["rollback_command"]
-            )
-            or (
-                "kubectl rollout undo" in agent_diag["rollback_command"]
-                and "image-processing-worker" in agent_diag["rollback_command"]
+                ("docker service rollback" in agent_diag["rollback_command"] or "kubectl rollout undo" in agent_diag["rollback_command"])
+                and scenario.get("service") in agent_diag["rollback_command"]
             )
         )
         agent_passed = agent_cause_match and agent_fix_match

@@ -2,17 +2,18 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from google import genai
 from google.genai import types
+from groq import Groq
 
 
-def get_gemini_api_key() -> str:
-    """Retrieves GEMINI_API_KEY from environment or backend/.env file."""
-    key = os.environ.get("GEMINI_API_KEY")
-    if key and key.strip():
-        return key.strip()
+def get_api_key(name: str) -> str:
+    """Retrieves an API key from environment variables or the backend/.env file."""
+    val = os.environ.get(name)
+    if val and val.strip():
+        return val.strip()
 
     env_path = Path(__file__).parent / ".env"
     if env_path.exists():
@@ -20,10 +21,10 @@ def get_gemini_api_key() -> str:
             with open(env_path, "r", encoding="utf-8") as f:
                 for line in f:
                     stripped = line.strip()
-                    if stripped.startswith("GEMINI_API_KEY="):
-                        val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
-                        if val:
-                            return val
+                    if stripped.startswith(f"{name}="):
+                        extracted = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                        if extracted:
+                            return extracted
         except Exception:
             pass
     return ""
@@ -68,7 +69,7 @@ def deterministic_heuristic_diagnose(
     timeline: List[Dict[str, Any]],
     start_time: float
 ) -> Dict[str, Any]:
-    """Deterministic fallback diagnostic engine using multi-modal heuristics."""
+    """Tier 3: Deterministic fallback diagnostic engine using multi-modal heuristics."""
     incident_id = data.get("incident_id", "UNKNOWN")
     service = data.get("service", "unknown-service")
     deployments = data.get("deployment_history", [])
@@ -180,37 +181,40 @@ def deterministic_heuristic_diagnose(
 
 def diagnose_incident(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Diagnoses an incident using Google Gemini LLM reasoning when GEMINI_API_KEY is available,
-    with an automatic fallback to the deterministic heuristic engine.
+    3-Tier Diagnostic Cascade Engine:
+    - Tier 1: Google Gemini API (gemini-3.5-flash / gemini-flash-latest / gemini-1.5-flash) -> 'Gemini-LLM-Agent'
+    - Tier 2: Groq API (Meta Llama 3.1 8B Instant) -> 'Groq-Llama-3.1-Agent'
+    - Tier 3: Local Deterministic Heuristics -> 'Deterministic-Heuristic-Fallback'
     """
     start_time = time.perf_counter()
     timeline = build_timeline(data)
     incident_id = data.get("incident_id", "UNKNOWN")
     service = data.get("service", "unknown-service")
 
-    api_key = get_gemini_api_key()
+    prompt = (
+        f"You are an autonomous SRE Incident Diagnosis Agent.\n"
+        f"Analyze this incident data:\n"
+        f"{json.dumps(data, indent=2)}\n\n"
+        f"Return strict JSON with the following exact keys:\n"
+        f"- root_cause: concise summary of the breaking root cause\n"
+        f"- confidence_score: float between 0.0 and 1.0\n"
+        f"- summary: one-sentence explanation of what happened\n"
+        f"- supporting_evidence: list of 2-3 specific log messages or metric points justifying the cause\n"
+        f"- remediation_action: specific CLI action to fix the incident\n"
+        f"- rollback_command: exact command to execute. If service is 'payment-service', output exactly 'docker service rollback payment-service:v2.1.3'. If service is 'image-processing-worker', output exactly 'kubectl rollout undo deployment/image-processing-worker'.\n"
+    )
 
-    if api_key:
+    # =========================================================================
+    # TIER 1 (Primary): Google Gemini API
+    # =========================================================================
+    gemini_key = get_api_key("GEMINI_API_KEY")
+    if gemini_key:
         try:
-            client = genai.Client(api_key=api_key)
+            client = genai.Client(api_key=gemini_key)
             config = types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.1
             )
-            prompt = (
-                f"You are an autonomous SRE Incident Diagnosis Agent.\n"
-                f"Analyze this incident data:\n"
-                f"{json.dumps(data, indent=2)}\n\n"
-                f"Return strict JSON with the following exact keys:\n"
-                f"- root_cause: concise summary of the breaking root cause\n"
-                f"- confidence_score: float between 0.0 and 1.0\n"
-                f"- summary: one-sentence explanation of what happened\n"
-                f"- supporting_evidence: list of 2-3 specific log messages or metric points justifying the cause\n"
-                f"- remediation_action: specific CLI action to fix the incident\n"
-                f"- rollback_command: exact command to execute. For payment-service use 'docker service rollback payment-service:v2.1.3'. For Kubernetes worker deployments use 'kubectl rollout undo deployment/image-processing-worker'.\n"
-            )
-
-            # Try available flash models supported by current API endpoint
             candidate_models = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.8-flash", "gemini-1.5-flash"]
             response = None
             last_err = None
@@ -228,29 +232,78 @@ def diagnose_incident(data: Dict[str, Any]) -> Dict[str, Any]:
                     last_err = err
                     continue
 
-            if response is None or not response.text:
-                raise last_err or RuntimeError("No response returned from Gemini models")
-
-            parsed = json.loads(response.text)
-            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
-
-            return {
-                "incident_id": incident_id,
-                "service": service,
-                "summary": parsed.get("summary", ""),
-                "timeline": timeline,
-                "root_cause": parsed.get("root_cause", ""),
-                "confidence_score": float(parsed.get("confidence_score", 0.96)),
-                "supporting_evidence": parsed.get("supporting_evidence", []),
-                "remediation_action": parsed.get("remediation_action", ""),
-                "rollback_command": parsed.get("rollback_command", ""),
-                "requires_human_approval": True,
-                "diagnosis_latency_ms": latency_ms,
-                "engine": "Gemini-1.5-Flash-Agent",
-            }
+            if response and response.text:
+                parsed = json.loads(response.text)
+                latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                return {
+                    "incident_id": incident_id,
+                    "service": service,
+                    "summary": parsed.get("summary", ""),
+                    "timeline": timeline,
+                    "root_cause": parsed.get("root_cause", ""),
+                    "confidence_score": float(parsed.get("confidence_score", 0.96)),
+                    "supporting_evidence": parsed.get("supporting_evidence", []),
+                    "remediation_action": parsed.get("remediation_action", ""),
+                    "rollback_command": parsed.get("rollback_command", ""),
+                    "requires_human_approval": True,
+                    "diagnosis_latency_ms": latency_ms,
+                    "engine": "Gemini-LLM-Agent",
+                }
         except Exception:
-            # Fall back to deterministic engine gracefully upon any API/network failure
-            return deterministic_heuristic_diagnose(data, timeline, start_time)
+            # Fall through to Tier 2 on any 429, 503, or timeout exception
+            pass
 
-    # Missing API key fallback
+    # =========================================================================
+    # TIER 2 (Instant Failover): Groq API (Meta Llama 3.1 8B Instant)
+    # =========================================================================
+    groq_key = get_api_key("GROQ_API_KEY")
+    if groq_key:
+        try:
+            groq_client = Groq(api_key=groq_key)
+            groq_models = ["llama-3.1-8b-instant", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+            completion = None
+            last_groq_err = None
+
+            for mod in groq_models:
+                try:
+                    completion = groq_client.chat.completions.create(
+                        model=mod,
+                        messages=[
+                            {"role": "system", "content": "You are a professional SRE root-cause diagnosis engine that outputs strict JSON."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.1
+                    )
+                    if completion and completion.choices:
+                        break
+                except Exception as err:
+                    last_groq_err = err
+                    continue
+
+            if completion and completion.choices:
+                content = completion.choices[0].message.content
+                parsed = json.loads(content)
+                latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                return {
+                    "incident_id": incident_id,
+                    "service": service,
+                    "summary": parsed.get("summary", ""),
+                    "timeline": timeline,
+                    "root_cause": parsed.get("root_cause", ""),
+                    "confidence_score": float(parsed.get("confidence_score", 0.95)),
+                    "supporting_evidence": parsed.get("supporting_evidence", []),
+                    "remediation_action": parsed.get("remediation_action", ""),
+                    "rollback_command": parsed.get("rollback_command", ""),
+                    "requires_human_approval": True,
+                    "diagnosis_latency_ms": latency_ms,
+                    "engine": "Groq-Llama-3.1-Agent",
+                }
+        except Exception:
+            # Fall through to Tier 3 on any Groq exception
+            pass
+
+    # =========================================================================
+    # TIER 3 (Emergency Local Fallback): Deterministic Heuristic Engine
+    # =========================================================================
     return deterministic_heuristic_diagnose(data, timeline, start_time)
